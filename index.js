@@ -43,36 +43,27 @@ function ts() {
 }
 
 class DiscordLogger {
-  constructor(msg, request) {
-    this.msg     = msg;
-    this.request = request;
-    this.lines   = [];
-    this.color   = 0x5865f2;
+  constructor(channel) {
+    this.channel = channel; // TextChannel pour envoyer de nouveaux messages
   }
 
-  async log(icon, text, color) {
-    if (color) this.color = color;
-    this.lines.push(`\`${ts()}\` ${icon} ${text}`);
-    console.log(`[${ts()}] ${icon} ${text}`);
-    await this._render();
+  async log(icon, text, color = 0x5865f2) {
+    const line = `\`${ts()}\` ${icon}  ${text}`;
+    console.log(line);
+    await this.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(color)
+          .setDescription(line)
+      ]
+    }).catch(() => {});
   }
 
-  async _render() {
-    const embed = new EmbedBuilder()
-      .setColor(this.color)
-      .setTitle(`🤖 Dev Agent — ${this.request.slice(0, 50)}`)
-      .setDescription(this.lines.join('\n'))
-      .setTimestamp();
-    await this.msg.edit({ embeds: [embed] }).catch(() => {});
-  }
-
-  // Raccourcis
-  info(text)    { return this.log('⏳', text); }
-  ok(text)      { return this.log('✅', text, 0x57f287); }
-  error(text)   { return this.log('❌', text, 0xff0000); }
+  info(text)  { return this.log('⏳', text, 0x5865f2); }
+  ok(text)    { return this.log('✅', text, 0x57f287); }
+  error(text) { return this.log('❌', text, 0xff0000); }
 }
 
-// Conservé pour les erreurs hors pipeline
 function embed(title, description, color = 0x5865f2) {
   return new EmbedBuilder()
     .setColor(color)
@@ -156,8 +147,8 @@ function parseChanges(text) {
 
 // ─── Pipeline principal ───────────────────────────────────────────────────────
 
-async function runDevPipeline(request, statusMsg) {
-  const log = new DiscordLogger(statusMsg, request);
+async function runDevPipeline(request, channel) {
+  const log = new DiscordLogger(channel);
 
   // 1. Clone ou pull
   await log.info(`Synchronisation de \`${GITHUB_REPO}\`…`);
@@ -313,21 +304,16 @@ discord.on('messageCreate', async (message) => {
     return;
   }
 
-  // Message de statut initial
-  const statusMsg = await message.reply({
-    embeds: [new EmbedBuilder()
-      .setColor(0x5865f2)
-      .setTitle(`🤖 Dev Agent — ${request.slice(0, 50)}`)
-      .setDescription(`\`${ts()}\` ⏳ Démarrage du pipeline…`)
-      .setTimestamp()
-    ],
+  // Message de démarrage
+  await message.reply({
+    embeds: [embed(`🤖 Dev Agent démarré`, `**Demande :** ${request}\n\nSuivez la progression ci-dessous ↓`)],
   });
 
   try {
-    await runDevPipeline(request, statusMsg);
+    await runDevPipeline(request, message.channel);
   } catch (err) {
     console.error('[ERROR]', err);
-    const log = new DiscordLogger(statusMsg, request);
+    const log = new DiscordLogger(message.channel);
     await log.error(`Erreur inattendue\n\`\`\`\n${String(err.message || err).slice(0, 1000)}\n\`\`\``).catch(() => {});
   }
 });
