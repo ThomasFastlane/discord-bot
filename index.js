@@ -280,6 +280,7 @@ RÈGLES STRICTES :
 // ─── Event handlers ───────────────────────────────────────────────────────────
 
 discord.on('messageCreate', async (message) => {
+  console.log(`[MSG] ${message.author.tag} : ${message.content}`);
   if (message.author.bot)                    return;
   if (!message.content.startsWith('!dev '))  return;
 
