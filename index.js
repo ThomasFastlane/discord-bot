@@ -127,6 +127,7 @@ function parseChanges(text) {
 
 async function runDevPipeline(request, statusMsg) {
   // 1. Clone ou pull
+  console.log('[STEP 1] Sync repo…');
   await setStatus(statusMsg, '📥 Repo', `Synchronisation de \`${GITHUB_REPO}\`…`);
 
   const repoUrl = `https://${GH_TOKEN}@github.com/${GITHUB_REPO}.git`;
@@ -137,33 +138,38 @@ async function runDevPipeline(request, statusMsg) {
 
   if (!fs.existsSync(path.join(WORKDIR, '.git'))) {
     await setStatus(statusMsg, '📥 Clone', `Premier clonage de \`${GITHUB_REPO}\`…`);
+    console.log('[STEP 1] Clonage…');
     await git.clone(repoUrl, '.', ['--depth=1']);
   } else {
     await setStatus(statusMsg, '🔄 Pull', `Mise à jour depuis \`origin/main\`…`);
-    // S'assure que le remote pointe bien sur l'URL avec token
+    console.log('[STEP 1] Pull…');
     await git.remote(['set-url', 'origin', repoUrl]);
     await git.pull('origin', 'main');
   }
+  console.log('[STEP 1] Repo OK');
 
   // Config git pour le commit
   await git.addConfig('user.name', 'Discord Dev Bot');
   await git.addConfig('user.email', 'bot@discord-dev.local');
 
   // 2. Construire le contexte pour Claude
+  console.log('[STEP 2] Lecture fichiers…');
   await setStatus(statusMsg, '🔍 Analyse', `Lecture du repo…`);
 
   const tree  = walkTree(WORKDIR).join('\n');
-  const files = collectSourceFiles(WORKDIR);
+  const files = collectSourceFiles(WORKDIR, 20); // réduit à 20 fichiers max
 
   let filesContext = '';
   for (const filePath of files) {
     const rel     = path.relative(WORKDIR, filePath);
-    const content = readSafe(filePath);
+    const content = readSafe(filePath, 30_000); // max 30kb par fichier
     if (content) filesContext += `\n\n### ${rel}\n\`\`\`\n${content}\n\`\`\``;
   }
+  console.log(`[STEP 2] ${files.length} fichiers lus`);
 
   // 3. Appel Claude
-  await setStatus(statusMsg, '🧠 Claude', `Génération des modifications…`);
+  console.log('[STEP 3] Appel Claude Sonnet…');
+  await setStatus(statusMsg, '🧠 Claude', `Génération des modifications… _(peut prendre 20-40s)_`);
 
   const system = `Tu es un expert développeur React / TypeScript / Vite / Tailwind.
 Tu travailles sur le projet dont la structure et les fichiers sources sont fournis ci-dessous.
@@ -192,11 +198,12 @@ RÈGLES STRICTES :
 6. Ne modifie que ce qui est nécessaire pour répondre à la demande.`;
 
   const response = await anthropic.messages.create({
-    model:      'claude-opus-4-6',
+    model:      'claude-sonnet-4-6',  // plus rapide qu'Opus
     max_tokens: 8192,
     system,
     messages:   [{ role: 'user', content: request }],
   });
+  console.log('[STEP 3] Claude OK');
 
   const claudeText = response.content[0]?.text ?? '';
   const changes    = parseChanges(claudeText);
