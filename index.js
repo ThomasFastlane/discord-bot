@@ -36,18 +36,49 @@ const discord   = new Client({
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// ─── Helpers Discord ──────────────────────────────────────────────────────────
+// ─── Logger Discord ───────────────────────────────────────────────────────────
 
+function ts() {
+  return new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+class DiscordLogger {
+  constructor(msg, request) {
+    this.msg     = msg;
+    this.request = request;
+    this.lines   = [];
+    this.color   = 0x5865f2;
+  }
+
+  async log(icon, text, color) {
+    if (color) this.color = color;
+    this.lines.push(`\`${ts()}\` ${icon} ${text}`);
+    console.log(`[${ts()}] ${icon} ${text}`);
+    await this._render();
+  }
+
+  async _render() {
+    const embed = new EmbedBuilder()
+      .setColor(this.color)
+      .setTitle(`🤖 Dev Agent — ${this.request.slice(0, 50)}`)
+      .setDescription(this.lines.join('\n'))
+      .setTimestamp();
+    await this.msg.edit({ embeds: [embed] }).catch(() => {});
+  }
+
+  // Raccourcis
+  info(text)    { return this.log('⏳', text); }
+  ok(text)      { return this.log('✅', text, 0x57f287); }
+  error(text)   { return this.log('❌', text, 0xff0000); }
+}
+
+// Conservé pour les erreurs hors pipeline
 function embed(title, description, color = 0x5865f2) {
   return new EmbedBuilder()
     .setColor(color)
     .setTitle(title)
     .setDescription(description)
     .setTimestamp();
-}
-
-async function setStatus(msg, title, description, color) {
-  await msg.edit({ embeds: [embed(title, description, color)] });
 }
 
 // ─── Helpers fichiers ─────────────────────────────────────────────────────────
@@ -126,50 +157,43 @@ function parseChanges(text) {
 // ─── Pipeline principal ───────────────────────────────────────────────────────
 
 async function runDevPipeline(request, statusMsg) {
+  const log = new DiscordLogger(statusMsg, request);
+
   // 1. Clone ou pull
-  console.log('[STEP 1] Sync repo…');
-  await setStatus(statusMsg, '📥 Repo', `Synchronisation de \`${GITHUB_REPO}\`…`);
+  await log.info(`Synchronisation de \`${GITHUB_REPO}\`…`);
 
   const repoUrl = `https://${GH_TOKEN}@github.com/${GITHUB_REPO}.git`;
-
   if (!fs.existsSync(WORKDIR)) fs.mkdirSync(WORKDIR, { recursive: true });
-
   const git = simpleGit(WORKDIR);
 
   if (!fs.existsSync(path.join(WORKDIR, '.git'))) {
-    await setStatus(statusMsg, '📥 Clone', `Premier clonage de \`${GITHUB_REPO}\`…`);
-    console.log('[STEP 1] Clonage…');
+    await log.info(`Clonage du repo (première fois)…`);
     await git.clone(repoUrl, '.', ['--depth=1']);
   } else {
-    await setStatus(statusMsg, '🔄 Pull', `Mise à jour depuis \`origin/main\`…`);
-    console.log('[STEP 1] Pull…');
+    await log.info(`Pull depuis \`origin/main\`…`);
     await git.remote(['set-url', 'origin', repoUrl]);
     await git.pull('origin', 'main');
   }
-  console.log('[STEP 1] Repo OK');
+  await log.ok(`Repo synchronisé`);
 
-  // Config git pour le commit
   await git.addConfig('user.name', 'Discord Dev Bot');
   await git.addConfig('user.email', 'bot@discord-dev.local');
 
-  // 2. Construire le contexte pour Claude
-  console.log('[STEP 2] Lecture fichiers…');
-  await setStatus(statusMsg, '🔍 Analyse', `Lecture du repo…`);
-
+  // 2. Lecture du repo
+  await log.info(`Lecture des fichiers sources…`);
   const tree  = walkTree(WORKDIR).join('\n');
-  const files = collectSourceFiles(WORKDIR, 20); // réduit à 20 fichiers max
+  const files = collectSourceFiles(WORKDIR, 20);
 
   let filesContext = '';
   for (const filePath of files) {
     const rel     = path.relative(WORKDIR, filePath);
-    const content = readSafe(filePath, 30_000); // max 30kb par fichier
+    const content = readSafe(filePath, 30_000);
     if (content) filesContext += `\n\n### ${rel}\n\`\`\`\n${content}\n\`\`\``;
   }
-  console.log(`[STEP 2] ${files.length} fichiers lus`);
+  await log.ok(`${files.length} fichiers analysés`);
 
   // 3. Appel Claude
-  console.log('[STEP 3] Appel Claude Sonnet…');
-  await setStatus(statusMsg, '🧠 Claude', `Génération des modifications… _(peut prendre 20-40s)_`);
+  await log.info(`Claude Opus réfléchit… _(30-60s)_`);
 
   const system = `Tu es un expert développeur React / TypeScript / Vite / Tailwind.
 Tu travailles sur le projet dont la structure et les fichiers sources sont fournis ci-dessous.
@@ -203,43 +227,37 @@ RÈGLES STRICTES :
     system,
     messages:   [{ role: 'user', content: request }],
   });
-  console.log('[STEP 3] Claude OK');
 
   const claudeText = response.content[0]?.text ?? '';
   const changes    = parseChanges(claudeText);
 
   if (!changes || changes.length === 0) {
-    throw new Error(
-      `Claude n'a pas retourné de JSON valide.\n\nRéponse brute :\n${claudeText.slice(0, 800)}`
-    );
+    await log.error(`Claude n'a pas retourné de modifications valides`);
+    throw new Error(`Réponse brute :\n${claudeText.slice(0, 600)}`);
   }
+  await log.ok(`Claude a généré **${changes.length}** fichier(s) à modifier`);
 
   // 4. Appliquer les modifications
-  await setStatus(
-    statusMsg,
-    '✏️ Modifications',
-    `Application de **${changes.length}** fichier(s)…`,
-  );
-
+  await log.info(`Écriture des fichiers…`);
   const modifiedPaths = [];
   for (const { path: relPath, content } of changes) {
-    // Sécurité : interdit les chemins qui remontent hors du WORKDIR
     const abs = path.resolve(WORKDIR, relPath);
     if (!abs.startsWith(WORKDIR)) throw new Error(`Chemin interdit : ${relPath}`);
-
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, content, 'utf-8');
     modifiedPaths.push(relPath);
+    await log.ok(`Fichier écrit : \`${relPath}\``);
   }
 
   // 5. npm install si package.json a changé
   if (modifiedPaths.some((p) => p === 'package.json')) {
-    await setStatus(statusMsg, '📦 npm install', `Installation des nouvelles dépendances…`);
+    await log.info(`\`npm install\` — nouvelles dépendances détectées…`);
     execSync('npm install', { cwd: WORKDIR, stdio: 'pipe', timeout: 120_000 });
+    await log.ok(`npm install terminé`);
   }
 
   // 6. Build
-  await setStatus(statusMsg, '🔨 Build', `\`npm run build\` en cours…`);
+  await log.info(`\`npm run build\` en cours…`);
 
   let buildLog = '';
   let buildOk  = false;
@@ -252,36 +270,25 @@ RÈGLES STRICTES :
     }).toString();
     buildOk = true;
   } catch (err) {
-    buildLog = (err.stderr?.toString() || err.stdout?.toString() || err.message).slice(0, 1800);
+    buildLog = (err.stderr?.toString() || err.stdout?.toString() || err.message).slice(0, 1200);
   }
 
-  // 7a. Build KO → revert + signalement
+  // 7a. Build KO → revert
   if (!buildOk) {
     await git.checkout(['--', '.']);
-    await setStatus(
-      statusMsg,
-      '❌ Build échoué — modifications annulées',
-      `**Erreur :**\n\`\`\`\n${buildLog}\n\`\`\``,
-      0xff0000,
-    );
+    await log.error(`Build échoué — modifications annulées\n\`\`\`\n${buildLog}\n\`\`\``);
     return;
   }
+  await log.ok(`Build réussi`);
 
-  // 7b. Build OK → commit + push
-  await setStatus(statusMsg, '🚀 Push', `Build OK — commit & push vers \`main\`…`);
-
+  // 7b. Commit + push
+  await log.info(`Commit & push vers \`origin/main\`…`);
   const commitMsg = `feat: ${request.slice(0, 72)} [bot]`;
   await git.add('.');
   await git.commit(commitMsg);
   await git.push('origin', 'main');
 
-  const fileList = modifiedPaths.map((p) => `• \`${p}\``).join('\n');
-  await setStatus(
-    statusMsg,
-    '✅ Déployé avec succès !',
-    `**Demande :** ${request}\n\n**Fichiers modifiés (${modifiedPaths.length}) :**\n${fileList}\n\n**Build :** OK\n**Commit :** \`${commitMsg}\`\n**Push :** → \`origin/main\``,
-    0x57f287,
-  );
+  await log.ok(`**Push terminé !** Commit : \`${commitMsg}\``);
 }
 
 // ─── Event handlers ───────────────────────────────────────────────────────────
@@ -303,21 +310,22 @@ discord.on('messageCreate', async (message) => {
     return;
   }
 
-  // Message de statut initial (sera mis à jour tout au long du pipeline)
+  // Message de statut initial
   const statusMsg = await message.reply({
-    embeds: [embed('🤖 Dev Agent démarré', `**Demande :** ${request}\n\n⏳ Démarrage du pipeline…`)],
+    embeds: [new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle(`🤖 Dev Agent — ${request.slice(0, 50)}`)
+      .setDescription(`\`${ts()}\` ⏳ Démarrage du pipeline…`)
+      .setTimestamp()
+    ],
   });
 
   try {
     await runDevPipeline(request, statusMsg);
   } catch (err) {
     console.error('[ERROR]', err);
-    await setStatus(
-      statusMsg,
-      '❌ Erreur inattendue',
-      `\`\`\`\n${String(err.message || err).slice(0, 1500)}\n\`\`\``,
-      0xff0000,
-    ).catch(() => {});
+    const log = new DiscordLogger(statusMsg, request);
+    await log.error(`Erreur inattendue\n\`\`\`\n${String(err.message || err).slice(0, 1000)}\n\`\`\``).catch(() => {});
   }
 });
 
