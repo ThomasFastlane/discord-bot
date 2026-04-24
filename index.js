@@ -198,7 +198,7 @@ RÈGLES STRICTES :
 6. Ne modifie que ce qui est nécessaire pour répondre à la demande.`;
 
   const response = await anthropic.messages.create({
-    model:      'claude-sonnet-4-6',  // plus rapide qu'Opus
+    model:      'claude-opus-4-6',
     max_tokens: 8192,
     system,
     messages:   [{ role: 'user', content: request }],
