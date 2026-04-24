@@ -249,10 +249,13 @@ RÈGLES STRICTES :
     await log.ok(`Fichier écrit : \`${relPath}\``);
   }
 
-  // 5. npm install si package.json a changé
-  if (modifiedPaths.some((p) => p === 'package.json')) {
-    await log.info(`\`npm install\` — nouvelles dépendances détectées…`);
-    execSync('npm install', { cwd: WORKDIR, stdio: 'pipe', timeout: 120_000 });
+  // 5. npm install — toujours si node_modules absent, ou si package.json modifié
+  const needsInstall = !fs.existsSync(path.join(WORKDIR, 'node_modules'))
+    || modifiedPaths.some((p) => p === 'package.json');
+
+  if (needsInstall) {
+    await log.info(`\`npm install\` en cours…`);
+    execSync('npm install', { cwd: WORKDIR, stdio: 'pipe', timeout: 180_000 });
     await log.ok(`npm install terminé`);
   }
 
